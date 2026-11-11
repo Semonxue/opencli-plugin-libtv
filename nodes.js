@@ -3,13 +3,13 @@ import { LIBTV_DOMAIN, LIBTV_HOME, loadCanvas, mb } from "./lib/utils.js";
 cli({
   site: "libtv",
   name: "nodes",
-  description: "List canvas nodes (type, model, group, dimensions, duration, size, url).",
+  description: "Core: list canvas nodes (type, model, group, dimensions, duration, size, url).",
   access: "read",
   domain: LIBTV_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
   navigateBefore: LIBTV_HOME,
-  example: "opencli libtv nodes 5110c03295d34f64aff6e398cb91d764 --type image --limit 30",
+  example: "opencli libtv nodes 0123456789abcdef0123456789abcdef --type image --limit 30",
   args: [
     { name: "project", positional: true, required: true, help: "Canvas URL, project uuid, numeric id, or name substring" },
     { name: "type", choices: ["all", "image", "video", "audio", "group"], default: "all", help: "Filter by node type" },

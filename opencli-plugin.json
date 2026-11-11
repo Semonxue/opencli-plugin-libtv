@@ -1,6 +1,6 @@
 {
   "name": "libtv",
-  "version": "0.2.0",
-  "description": "LibTV (liblib.tv) CLI adapter — canvases (by URL/uuid/name), nodes, assets, grouped export, characters, artifacts",
+  "version": "0.3.1",
+  "description": "LibTV (liblib.tv) CLI adapter — browse canvases by URL/uuid/name, inspect nodes/assets/groups/prompts, and export media",
   "opencli": ">=2.0.0"
 }

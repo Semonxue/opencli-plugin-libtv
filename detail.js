@@ -3,13 +3,13 @@ import { LIBTV_DOMAIN, LIBTV_HOME, byType, formatDate, loadCanvas, mb, sumBytes 
 cli({
   site: "libtv",
   name: "detail",
-  description: "Summarise one LibTV canvas: nodes, assets by type, groups, size, models.",
+  description: "Core: summarise one canvas \u2014 nodes, assets by type, groups, size, models.",
   access: "read",
   domain: LIBTV_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
   navigateBefore: LIBTV_HOME,
-  example: "opencli libtv detail 5110c03295d34f64aff6e398cb91d764",
+  example: "opencli libtv detail 0123456789abcdef0123456789abcdef",
   args: [
     { name: "project", positional: true, required: true, help: "Canvas URL, project uuid, numeric id, or name substring" }
   ],

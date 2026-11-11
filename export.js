@@ -1,4 +1,5 @@
 import { cli, Strategy } from "@jackwener/opencli/registry";
+import { CommandExecutionError } from "@jackwener/opencli/errors";
 import * as path from "node:path";
 import {
   LIBTV_DOMAIN,
@@ -14,13 +15,13 @@ cli({
   site: "libtv",
   name: "export",
   aliases: ["download"],
-  description: "Download all canvas assets into <out>/<group>/<type>/ folders, plus manifest.csv.",
+  description: "Utility: download canvas assets into <out>/<group>/<type>/ folders plus manifest.csv.",
   access: "read",
   domain: LIBTV_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
   navigateBefore: LIBTV_HOME,
-  example: "opencli libtv export 5110c03295d34f64aff6e398cb91d764 --out ./exports",
+  example: "opencli libtv export 0123456789abcdef0123456789abcdef --out ./exports",
   args: [
     { name: "project", positional: true, required: true, help: "Canvas URL, project uuid, numeric id, or name substring" },
     { name: "out", default: "./libtv-export", help: "Parent output directory (a project subfolder is created)" },
@@ -39,6 +40,17 @@ cli({
     let planned = planExport(canvas, { types });
     if (groupNeedle) {
       planned = planned.filter((p) => p.asset.group.toLowerCase().includes(groupNeedle));
+    }
+    if (!planned.length) {
+      if (canvas.assets.length) {
+        throw new CommandExecutionError(
+          `No assets matched the --type/--group filters (canvas has ${canvas.assets.length} assets).`,
+          "Drop the filters or try a different group/type."
+        );
+      }
+      process.stderr.write(`libtv export: ${canvas.project.name} \u2014 canvas has no downloadable assets.
+`);
+      return [];
     }
     const outDir = path.resolve(String(kwargs.out ?? "./libtv-export"), safeName(canvas.project.name, 80));
     process.stderr.write(
@@ -65,6 +77,12 @@ cli({
       `libtv export: done \u2014 ${results.filter((r) => r.status === "ok").length} downloaded, ${results.filter((r) => r.status === "skipped").length} skipped, ${failed.length} failed
 `
     );
+    if (failed.length) {
+      throw new CommandExecutionError(
+        `${failed.length}/${planned.length} downloads failed (first: ${failed[0].relPath} \u2014 ${failed[0].error ?? "unknown error"}). Existing files are kept; re-run to resume.`,
+        "Failed files are retried from scratch; already-downloaded files are skipped."
+      );
+    }
     if (kwargs.summary) {
       const buckets = /* @__PURE__ */ new Map();
       for (let i = 0; i < planned.length; i++) {

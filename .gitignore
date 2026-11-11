@@ -1,3 +1,9 @@
 node_modules/
 *.log
 .DS_Store
+
+# local export output / scratch data (see README examples)
+exports/
+libtv-export/
+*.csv
+*.part

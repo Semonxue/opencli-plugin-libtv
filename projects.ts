@@ -1,9 +1,11 @@
 /**
- * `opencli libtv projects` — list canvas projects.
+ * `opencli libtv projects` — list canvas projects. This is the entry point:
+ * every other command takes a project reference that appears here.
  *
  * One row per canvas with the uuid needed by every other command, the
  * owning space id, timestamps and a clickable URL. `--search` filters by
- * name substring so agents can resolve "the 科技篇 canvas" without paging.
+ * name substring so agents can resolve "the demo canvas" without paging,
+ * and `--space` narrows the list to one space/folder.
  */
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { LIBTV_DOMAIN, LIBTV_HOME, formatDate, listProjects } from './lib/utils.js';
@@ -12,7 +14,7 @@ cli({
     site: 'libtv',
     name: 'projects',
     aliases: ['ls'],
-    description: 'List LibTV canvas projects (uuid, name, space, updated, url).',
+    description: 'Core: list canvas projects (uuid, name, space, updated, url).',
     access: 'read',
     domain: LIBTV_DOMAIN,
     strategy: Strategy.COOKIE,
@@ -22,11 +24,13 @@ cli({
     args: [
         { name: 'limit', type: 'int', default: 50, help: 'Max projects to return (default: 50)' },
         { name: 'search', default: '', help: 'Filter by project name substring' },
+        { name: 'space', type: 'int', default: 0, help: 'Only projects in this space/folder id (see space_id)' },
     ],
     columns: ['uuid', 'name', 'space_id', 'updated', 'url'],
     func: async (page: any, kwargs: any) => {
         const limit = Number(kwargs.limit) > 0 ? Number(kwargs.limit) : 50;
-        const rows = await listProjects(page, { limit, search: String(kwargs.search ?? '') });
+        const spaceId = Number(kwargs.space) > 0 ? Number(kwargs.space) : 0;
+        const rows = await listProjects(page, { limit, search: String(kwargs.search ?? ''), spaceId });
         return rows.map((p) => ({
             uuid: p.uuid,
             name: p.name,

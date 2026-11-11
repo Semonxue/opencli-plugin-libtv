@@ -4,13 +4,13 @@ cli({
   site: "libtv",
   name: "groups",
   aliases: ["tree"],
-  description: "List canvas groups with child counts and per-type asset totals.",
+  description: "Core: list canvas groups with child counts and per-type asset totals.",
   access: "read",
   domain: LIBTV_DOMAIN,
   strategy: Strategy.COOKIE,
   browser: true,
   navigateBefore: LIBTV_HOME,
-  example: "opencli libtv groups 5110c03295d34f64aff6e398cb91d764",
+  example: "opencli libtv groups 0123456789abcdef0123456789abcdef",
   args: [
     { name: "project", positional: true, required: true, help: "Canvas URL, project uuid, numeric id, or name substring" },
     { name: "ungrouped", type: "bool", default: true, help: "Include a row for ungrouped assets" }
@@ -18,11 +18,16 @@ cli({
   columns: ["group", "nodes", "images", "videos", "audio", "size_mb", "size_unknown", "role_id"],
   func: async (page, kwargs) => {
     const canvas = await loadCanvas(page, String(kwargs.project));
+    const nameCounts = /* @__PURE__ */ new Map();
+    for (const g of canvas.groups) nameCounts.set(g.name, (nameCounts.get(g.name) ?? 0) + 1);
     const rows = canvas.groups.map((g) => {
-      const inGroup = canvas.assets.filter((a) => a.group === g.name);
+      const inGroup = canvas.assets.filter((a) => a.groupKey === g.key);
+      const label = (nameCounts.get(g.name) ?? 0) > 1 ? `${g.name} (${g.key.slice(-6)})` : g.name;
       return {
-        group: g.name,
-        nodes: g.childCount,
+        group: label,
+        // Count every node we actually assigned to this group (media-less
+        // nodes included), not just the group's declared childNodeIds.
+        nodes: canvas.flatNodes.filter((n) => n.groupKey === g.key).length,
         images: inGroup.filter((a) => a.type === "image").length,
         videos: inGroup.filter((a) => a.type === "video").length,
         audio: inGroup.filter((a) => a.type === "audio").length,
@@ -32,11 +37,11 @@ cli({
       };
     });
     if (kwargs.ungrouped !== false) {
-      const loose = canvas.assets.filter((a) => !a.group);
+      const loose = canvas.assets.filter((a) => !a.groupKey);
       if (loose.length) {
         rows.push({
           group: "_ungrouped",
-          nodes: canvas.flatNodes.filter((n) => !n.group).length,
+          nodes: canvas.flatNodes.filter((n) => !n.groupKey).length,
           images: loose.filter((a) => a.type === "image").length,
           videos: loose.filter((a) => a.type === "video").length,
           audio: loose.filter((a) => a.type === "audio").length,

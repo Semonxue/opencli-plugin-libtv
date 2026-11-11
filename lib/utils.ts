@@ -51,18 +51,34 @@ export const TYPE_EXTS: Record<string, string> = { image: 'png', video: 'mp4', a
 
 // ── Auth ────────────────────────────────────────────────────────────────────
 
-/** Read the `usertoken` cookie from the logged-in page. */
-export async function getToken(page: any): Promise<string> {
-    const raw = await page.evaluate('document.cookie');
-    const m = String(raw ?? '').match(/usertoken=([^;]+)/);
-    if (!m) {
+interface LibtvAuth {
+    token: string;
+    webid: string;
+}
+
+/** Read one cookie value from a raw `document.cookie` string. */
+function cookieValue(cookie: string, name: string): string {
+    const m = String(cookie ?? '').match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+    if (!m) return '';
+    try {
+        return decodeURIComponent(m[1]);
+    } catch {
+        return m[1];
+    }
+}
+
+/** Read `usertoken` + `webid` in a single page evaluation. */
+export async function getAuth(page: any): Promise<LibtvAuth> {
+    const raw = String((await page.evaluate('document.cookie')) ?? '');
+    const token = cookieValue(raw, 'usertoken');
+    if (!token) {
         throw new AuthRequiredError(
             LIBTV_DOMAIN,
             'LibTV session not found (usertoken cookie missing).',
             'Log in at https://www.liblib.tv first, then retry.',
         );
     }
-    return decodeURIComponent(m[1]);
+    return { token, webid: cookieValue(raw, 'webid') };
 }
 
 // ── API plumbing ────────────────────────────────────────────────────────────
@@ -78,19 +94,34 @@ interface ApiOptions {
  * Returns `data` on `code === 0`, throws a typed error otherwise.
  */
 export async function callApi(page: any, host: string, apiPath: string, opts: ApiOptions = {}): Promise<any> {
-    const token = await getToken(page);
+    const auth = await getAuth(page);
     const method = opts.method ?? 'POST';
-    const res: any = await page.fetchJson(`${host}${apiPath}`, {
-        method,
-        headers: {
-            token,
-            webid: await getWebId(page),
-            'x-client-type': 'web',
-            'x-language': 'zh',
-        },
-        ...(opts.body !== undefined ? { body: opts.body } : {}),
-        timeoutMs: opts.timeoutMs ?? 60_000,
-    });
+    let res: any;
+    try {
+        res = await page.fetchJson(`${host}${apiPath}`, {
+            method,
+            headers: {
+                token: auth.token,
+                webid: auth.webid,
+                'x-client-type': 'web',
+                'x-language': 'zh',
+            },
+            ...(opts.body !== undefined ? { body: opts.body } : {}),
+            timeoutMs: opts.timeoutMs ?? 60_000,
+        });
+    } catch (err: any) {
+        const message = String(err?.message ?? err);
+        // page.fetchJson throws on HTTP errors; surface auth failures as such
+        // instead of a generic "fetch failed".
+        if (/(^|\D)(401|403)(\D|$)/.test(message) || /unauthori[sz]ed|forbidden/i.test(message)) {
+            throw new AuthRequiredError(
+                LIBTV_DOMAIN,
+                `LibTV rejected the request (HTTP 401/403): ${message}`,
+                'Re-open https://www.liblib.tv and make sure you are signed in.',
+            );
+        }
+        throw new CommandExecutionError(`LibTV API ${method} ${apiPath} request failed: ${message}`);
+    }
     // Runtime shapes differ by opencli version: some builds return the raw
     // JSON body, others a `{ ok, status, text }` envelope. Accept both.
     if (res === null || res === undefined) {
@@ -128,12 +159,6 @@ export async function callApi(page: any, host: string, apiPath: string, opts: Ap
     return body?.data;
 }
 
-async function getWebId(page: any): Promise<string> {
-    const raw = await page.evaluate('document.cookie');
-    const m = String(raw ?? '').match(/(?:^|;\s*)webid=([^;]+)/);
-    return m ? decodeURIComponent(m[1]) : '';
-}
-
 // ── Projects ────────────────────────────────────────────────────────────────
 
 export interface LibtvProject {
@@ -152,11 +177,12 @@ const PROJECT_PAGE_SIZE = 50;
 
 /**
  * Page through `/api/canvas/project/list`.
- * `limit` caps returned rows; `search` is a case-insensitive name substring.
+ * `limit` caps returned rows; `search` is a case-insensitive name substring;
+ * `spaceId` restricts the listing to one space/folder.
  */
 export async function listProjects(
     page: any,
-    { limit = 200, search = '' }: { limit?: number; search?: string } = {},
+    { limit = 200, search = '', spaceId = 0 }: { limit?: number; search?: string; spaceId?: number } = {},
 ): Promise<LibtvProject[]> {
     const needle = search.trim().toLowerCase();
     const out: LibtvProject[] = [];
@@ -164,7 +190,11 @@ export async function listProjects(
     let total = Infinity;
     while (out.length < limit && pageNum <= 40 && (pageNum - 1) * PROJECT_PAGE_SIZE < total) {
         const data = await callApi(page, CANVAS_HOST, '/api/canvas/project/list', {
-            body: { page: pageNum, pageSize: PROJECT_PAGE_SIZE },
+            body: {
+                page: pageNum,
+                pageSize: PROJECT_PAGE_SIZE,
+                ...(spaceId > 0 ? { folderId: spaceId } : {}),
+            },
         });
         const items: any[] = Array.isArray(data?.projectMetaList) ? data.projectMetaList : [];
         total = Number(data?.total ?? items.length);
@@ -216,12 +246,12 @@ export interface ProjectRef {
 /**
  * Parse a `<project>` argument. Accepts, in this order:
  *
- *   https://www.liblib.tv/canvas?spaceId=11161198&projectId=5110c032...
- *   https://www.liblib.tv/canvas?projectId=5110c032...        (spaceId optional)
- *   .../canvas/5110c03295d34f64aff6e398cb91d764               (uuid in the path)
- *   5110c03295d34f64aff6e398cb91d764                          (bare uuid)
- *   14839047                                                 (numeric project id)
- *   科技篇                                                    (name substring)
+ *   https://www.liblib.tv/canvas?spaceId=10001&projectId=0123456789abcdef0123456789abcdef
+ *   https://www.liblib.tv/canvas?projectId=0123456789abcdef0123456789abcdef  (spaceId optional)
+ *   .../canvas/0123456789abcdef0123456789abcdef               (uuid in the path)
+ *   0123456789abcdef0123456789abcdef                          (bare uuid)
+ *   1000001                                                   (numeric project id)
+ *   demo                                                      (name substring)
  *
  * URL params checked for the uuid: `projectId`, `projectUuid`, `uuid`, `canvasId`.
  * Space hints: `spaceId`, `projectSpaceId`, `folderId`.
@@ -244,7 +274,7 @@ export function parseProjectRef(ref: string): ProjectRef {
             const value = (params.get(key) ?? '').trim();
             if (!value) continue;
             if (UUID_RE.test(value)) {
-                uuid = value;
+                uuid = value.toLowerCase();
                 break;
             }
             if (/^\d+$/.test(value) && !numericId) numericId = Number(value);
@@ -252,7 +282,7 @@ export function parseProjectRef(ref: string): ProjectRef {
         if (!uuid && !numericId) {
             // Some routes carry the uuid as a path segment instead of a param.
             const hit = url.pathname.match(/[0-9a-f]{32}/i);
-            if (hit) uuid = hit[0];
+            if (hit) uuid = hit[0].toLowerCase();
         }
         const spaceRaw = (
             params.get('spaceId') ??
@@ -270,7 +300,7 @@ export function parseProjectRef(ref: string): ProjectRef {
         };
     }
 
-    if (UUID_RE.test(raw)) return { kind: 'uuid', uuid: raw, numericId: 0, spaceId: 0 };
+    if (UUID_RE.test(raw)) return { kind: 'uuid', uuid: raw.toLowerCase(), numericId: 0, spaceId: 0 };
     if (/^\d+$/.test(raw)) return { kind: 'id', uuid: '', numericId: Number(raw), spaceId: 0 };
     return { kind: 'name', uuid: '', numericId: 0, spaceId: 0 };
 }
@@ -311,12 +341,16 @@ export async function resolveProject(page: any, ref: string, limit = 400): Promi
     if (!needle) throw new CommandExecutionError('A project URL, uuid, id or name is required.');
 
     const all = await listProjects(page, { limit });
-    if (parsed.kind === 'id') {
+    if (parsed.kind === 'id' || parsed.numericId) {
         const byId = all.find((p) => p.id === parsed.numericId);
         if (byId) return byId;
-        throw new CommandExecutionError(
-            `No LibTV project with id ${parsed.numericId}. Run \`opencli libtv projects\` to list them.`,
-        );
+        if (parsed.kind === 'url') {
+            throw new CommandExecutionError(
+                `No LibTV project with id ${parsed.numericId}. Run \`opencli libtv projects\` to list them.`,
+            );
+        }
+        // A bare number can also be a project *name* (some canvases are named
+        // like "20261111"), so fall through to name matching before failing.
     }
 
     const lower = needle.toLowerCase();
@@ -347,6 +381,8 @@ export interface LibtvAsset {
     project: string;
     projectUuid: string;
     group: string;
+    /** nodeKey of the owning group node ('' when ungrouped). */
+    groupKey: string;
     type: AssetType;
     name: string;
     model: string;
@@ -377,6 +413,8 @@ export interface LibtvFlatNode {
     type: string;
     model: string;
     group: string;
+    /** nodeKey of the owning group node ('' when ungrouped). */
+    groupKey: string;
     width: number | '';
     height: number | '';
     durationSec: number | '';
@@ -450,7 +488,12 @@ export async function fetchCanvas(page: any, project: LibtvProject): Promise<Lib
         const data = await callApi(page, CANVAS_HOST, `/api/canvas/project/detail?uuid=${encodeURIComponent(project.uuid)}`, {
             method: 'GET',
         });
-        if (data && Array.isArray(data.nodeList)) detail = data;
+        // Accept both shapes: the payload directly, or wrapped in projectDetail.
+        const nested = data?.projectDetail;
+        const candidate = Array.isArray(data?.nodeList) ? data : nested && Array.isArray(nested.nodeList) ? nested : null;
+        if (candidate) {
+            detail = candidate.projectMeta ? candidate : { ...candidate, projectMeta: data?.projectMeta };
+        }
     } catch (err) {
         lastError = err;
     }
@@ -485,12 +528,17 @@ export function parseCanvas(project: LibtvProject, detail: any): LibtvCanvas {
 
     const groups: LibtvGroup[] = [];
     const groupName = new Map<string, string>();
+    /** child nodeKey → owning group nodeKey (the group's `childNodeIds` list). */
+    const childGroup = new Map<string, string>();
     for (const n of nodes) {
         if (Number(n?.type) !== 5) continue;
         const data = nodeData(n);
         const key = String(n.nodeKey);
         const name = String(n.name ?? data?.name ?? key);
         groupName.set(key, name);
+        if (Array.isArray(data?.childNodeIds)) {
+            for (const child of data.childNodeIds) childGroup.set(String(child), key);
+        }
         const ca = data?.characterAsset;
         groups.push({
             key,
@@ -499,6 +547,12 @@ export function parseCanvas(project: LibtvProject, detail: any): LibtvCanvas {
             roleId: ca?.roleId ? String(ca.roleId) : '',
         });
     }
+    /** Membership is `parentKey` when it points at a group, else the group's childNodeIds. */
+    const groupKeyOf = (n: any): string => {
+        const parent = String(n?.parentKey ?? '');
+        if (groupName.has(parent)) return parent;
+        return childGroup.get(String(n?.nodeKey ?? '')) ?? '';
+    };
 
     const assets: LibtvAsset[] = [];
     const flatNodes: LibtvFlatNode[] = [];
@@ -508,30 +562,44 @@ export function parseCanvas(project: LibtvProject, detail: any): LibtvCanvas {
         const data = nodeData(n);
         const urls = nodeUrls(data);
         const metaItems = data?._resourceMeta?.items;
-        const meta = Array.isArray(metaItems) && metaItems.length ? metaItems[0] : {};
-        const group = groupName.get(String(n?.parentKey ?? '')) ?? '';
-        const base = {
+        const metaList: any[] = Array.isArray(metaItems) ? metaItems : [];
+        const groupKey = groupKeyOf(n);
+        const group = groupKey ? groupName.get(groupKey) ?? '' : '';
+        const identity = {
             nodeKey: String(n?.nodeKey ?? ''),
             name: String(n?.name ?? '(untitled)'),
             type,
             model: String(n?.toolKey || data?.params?.model || '-'),
             group,
-            width: meta?.width ?? '',
-            height: meta?.height ?? '',
-            durationSec: meta?.durationSec ?? '',
-            bytes: Number(meta?.byteSize ?? 0),
+            groupKey,
         };
-        flatNodes.push({ ...base, url: urls[0] ?? '' });
+        const firstMeta = metaList[0] ?? {};
+        flatNodes.push({
+            ...identity,
+            width: firstMeta.width ?? '',
+            height: firstMeta.height ?? '',
+            durationSec: firstMeta.durationSec ?? '',
+            bytes: Number(firstMeta.byteSize ?? 0),
+            url: urls[0] ?? '',
+        });
         if (typeNum === 5 || !urls.length) continue;
         const prompt =
             String(data?.params?.prompt ?? '') ||
             (Array.isArray(data?.params?.textList) ? data.params.textList.join('\n') : '');
-        for (const url of urls) {
+        // A node may carry several URLs; align each with its own metadata entry
+        // (falling back to the first) so sizes/dimensions are not double-counted.
+        for (let i = 0; i < urls.length; i++) {
+            const meta = metaList[i] ?? firstMeta;
+            const url = urls[i];
             assets.push({
-                ...base,
+                ...identity,
                 project: project.name,
                 projectUuid: project.uuid,
                 type: type as AssetType,
+                width: meta?.width ?? '',
+                height: meta?.height ?? '',
+                durationSec: meta?.durationSec ?? '',
+                bytes: Number(meta?.byteSize ?? 0),
                 mime: String(meta?.mimeType ?? ''),
                 prompt,
                 url,
@@ -556,7 +624,7 @@ export async function loadCanvas(page: any, ref: string): Promise<LibtvCanvas> {
     return fetchCanvas(page, project);
 }
 
-// ── Account / library endpoints ─────────────────────────────────────────────
+// ── Account ─────────────────────────────────────────────────────────────────
 
 export interface LibtvAccount {
     name: string;
@@ -565,10 +633,8 @@ export interface LibtvAccount {
     totalPower: number;
     usablePower: number;
     libtvUsablePower: number;
-    usedPower: number;
     freePower: number;
     concurrent: number;
-    downloadCount: number;
 }
 
 export async function readAccount(page: any): Promise<LibtvAccount> {
@@ -588,144 +654,15 @@ export async function readAccount(page: any): Promise<LibtvAccount> {
         totalPower: Number(attr?.totalPower ?? 0),
         usablePower: Number(attr?.usablePower ?? 0),
         libtvUsablePower: Number(attr?.libtvUsablePower ?? 0),
-        usedPower: Number(attr?.usedPower ?? 0),
         freePower,
         concurrent: Number(attr?.concurrent ?? 0),
-        downloadCount: Number(attr?.downloadCount ?? 0),
     };
 }
 
-export interface LibtvCharacter {
-    uuid: string;
-    name: string;
-    gender: string;
-    ageStage: string;
-    region: string;
-    era: string;
-    version: number;
-    cover: string;
-    updatedAtMs: number;
-}
-
-export async function listCharacters(page: any, limit = 100): Promise<LibtvCharacter[]> {
-    const out: LibtvCharacter[] = [];
-    let pageNum = 1;
-    while (out.length < limit && pageNum <= 20) {
-        const data = await callApi(page, CANVAS_HOST, '/api/user/character/list', {
-            body: { page: pageNum, pageSize: 50 },
-        });
-        const items: any[] = Array.isArray(data?.list) ? data.list : [];
-        for (const it of items) {
-            out.push({
-                uuid: String(it?.characterUuid ?? ''),
-                name: String(it?.name ?? ''),
-                gender: String(it?.gender ?? ''),
-                ageStage: String(it?.ageStage ?? ''),
-                region: String(it?.region ?? ''),
-                era: String(it?.era ?? ''),
-                version: Number(it?.currentVersion ?? 0),
-                cover: String(it?.coverUrl ?? ''),
-                updatedAtMs: Number(it?.updatedAtMs ?? 0),
-            });
-            if (out.length >= limit) break;
-        }
-        if (!data?.hasMore || items.length === 0) break;
-        pageNum++;
-    }
-    return out;
-}
-
-export interface LibtvArtifact {
-    artifactId: string;
-    taskId: string;
-    mediaType: string;
-    projectUuid: string;
-    nodeKey: string;
-    rating: number;
-    width: string;
-    height: string;
-    url: string;
-    createdAtMs: number;
-}
-
-export async function listArtifacts(
-    page: any,
-    { limit = 50, projectUuid = '', mediaType = '' }: { limit?: number; projectUuid?: string; mediaType?: string } = {},
-): Promise<LibtvArtifact[]> {
-    const out: LibtvArtifact[] = [];
-    let pageNum = 1;
-    while (out.length < limit && pageNum <= 40) {
-        const data = await callApi(page, CANVAS_HOST, '/api/task/artifact/list', {
-            body: { page: pageNum, pageSize: 50, projectUuid: projectUuid || undefined },
-        });
-        const items: any[] = Array.isArray(data?.list) ? data.list : [];
-        for (const it of items) {
-            const media = String(it?.mediaType ?? '');
-            if (mediaType && media !== mediaType) continue;
-            if (projectUuid && String(it?.projectUuid ?? '') !== projectUuid) continue;
-            let extra: any = {};
-            try {
-                extra = typeof it?.extra === 'string' ? JSON.parse(it.extra) : it?.extra ?? {};
-            } catch {
-                extra = {};
-            }
-            out.push({
-                artifactId: String(it?.artifactId ?? ''),
-                taskId: String(it?.taskId ?? ''),
-                mediaType: media,
-                projectUuid: String(it?.projectUuid ?? ''),
-                nodeKey: String(it?.nodeKey ?? ''),
-                rating: Number(it?.rating ?? 0),
-                width: extra?.width ? String(extra.width) : '',
-                height: extra?.height ? String(extra.height) : '',
-                url: String(it?.previewPath ?? ''),
-                createdAtMs: Number(it?.createdAtMs ?? 0),
-            });
-            if (out.length >= limit) break;
-        }
-        if (items.length < 50) break;
-        pageNum++;
-    }
-    return out;
-}
-
-export interface LibtvWorkflow {
-    uuid: string;
-    name: string;
-    updatedAtMs: number;
-}
-
-export async function listWorkflows(page: any, limit = 100): Promise<LibtvWorkflow[]> {
-    const data = await callApi(page, CANVAS_HOST, '/api/canvas/workflow/list', {
-        body: { page: 1, pageSize: Math.min(Math.max(limit, 1), 200) },
-    });
-    const items: any[] = Array.isArray(data?.workflowList) ? data.workflowList : [];
-    return items.slice(0, limit).map((it) => ({
-        uuid: String(it?.uuid ?? it?.workflowUuid ?? ''),
-        name: String(it?.name ?? '(untitled)'),
-        updatedAtMs: Number(it?.updatedAtMs ?? 0),
-    }));
-}
-
-export interface LibtvVersion {
-    versionId: string;
-    name: string;
-    createdAtMs: number;
-}
-
-export async function listVersions(page: any, project: LibtvProject, limit = 50): Promise<LibtvVersion[]> {
-    const data = await callApi(page, CANVAS_HOST, '/api/canvas/project/version/list', {
-        body: { projectUuid: project.uuid, page: 1, pageSize: Math.min(Math.max(limit, 1), 100) },
-    });
-    const items: any[] = Array.isArray(data?.versionList) ? data.versionList : [];
-    return items.slice(0, limit).map((it) => ({
-        versionId: String(it?.versionId ?? it?.id ?? ''),
-        name: String(it?.versionName ?? it?.name ?? ''),
-        createdAtMs: Number(it?.createdAtMs ?? it?.createAtMs ?? 0),
-    }));
-}
-
 // ── Export ──────────────────────────────────────────────────────────────────
+
+/** Windows device names that cannot be used as a file/dir base name. */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 /** Filesystem-safe file/dir name that keeps CJK characters readable. */
 export function safeName(input: string, max = 70): string {
@@ -733,10 +670,25 @@ export function safeName(input: string, max = 70): string {
         .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
         .replace(/\s+/g, ' ')
         .trim()
-        .replace(/^\.+$/, '')
+        .replace(/[. ]+$/, '') // trailing dots/spaces are invalid on Windows
         .slice(0, max)
-        .trim();
-    return cleaned || 'unnamed';
+        .trim()
+        .replace(/[. ]+$/, '');
+    const base = cleaned || 'unnamed';
+    return WINDOWS_RESERVED.test(base) ? `_${base}` : base;
+}
+
+/** Trim a string to at most `maxBytes` UTF-8 bytes without splitting CJK characters. */
+export function trimToBytes(input: string, maxBytes: number): string {
+    let out = '';
+    let bytes = 0;
+    for (const ch of String(input ?? '')) {
+        const size = Buffer.byteLength(ch, 'utf8');
+        if (bytes + size > maxBytes) break;
+        out += ch;
+        bytes += size;
+    }
+    return out;
 }
 
 export interface PlannedFile {
@@ -746,23 +698,56 @@ export interface PlannedFile {
 }
 
 /**
+ * Folder name per group node key. Distinct groups may share a display name;
+ * when they do, a short suffix from the group node key keeps their export
+ * folders apart instead of silently merging them.
+ */
+function groupDirs(canvas: LibtvCanvas): Map<string, string> {
+    const counts = new Map<string, number>();
+    for (const g of canvas.groups) counts.set(g.name, (counts.get(g.name) ?? 0) + 1);
+    const dirs = new Map<string, string>();
+    for (const g of canvas.groups) {
+        const duplicate = (counts.get(g.name) ?? 0) > 1;
+        const label = duplicate ? `${g.name} (${g.key.slice(-6)})` : g.name;
+        dirs.set(g.key, safeName(label, 60));
+    }
+    return dirs;
+}
+
+/** File name for one asset: `NNN_name_nodeKey.ext`, bounded in UTF-8 bytes. */
+function fileNameFor(seq: string, asset: LibtvAsset): string {
+    const prefix = `${seq}_`;
+    const suffix = `_${safeName(asset.nodeKey, 24)}`;
+    const ext = asset.ext;
+    // Keep the whole component under 190 bytes, leaving headroom below the
+    // common 255-byte per-component limit even for long CJK names.
+    const budget = 190 - Buffer.byteLength(prefix + suffix, 'utf8') - Buffer.byteLength(ext, 'utf8') - 1;
+    const name = trimToBytes(safeName(asset.name, 60), Math.max(16, budget));
+    return `${prefix}${name}${suffix}.${ext}`;
+}
+
+/**
  * Plan the export tree: `<group>/<typeDir>/<NNN_name_nodeKey>.<ext>`.
  * Projects without groups drop the group level entirely.
  */
 export function planExport(canvas: LibtvCanvas, opts: { types?: string[] } = {}): PlannedFile[] {
     const wanted = opts.types && opts.types.length ? new Set(opts.types) : null;
     const hasGroups = canvas.groups.length > 0;
+    const dirs = groupDirs(canvas);
     const counters: Record<string, number> = {};
     const planned: PlannedFile[] = [];
     for (const a of canvas.assets) {
         if (wanted && !wanted.has(a.type)) continue;
         const typeDir = TYPE_DIRS[a.type] ?? a.type;
-        const groupDir = hasGroups ? safeName(a.group || '_ungrouped', 60) : '';
+        const groupDir = hasGroups
+            ? a.groupKey
+                ? dirs.get(a.groupKey) ?? safeName(a.group || '_ungrouped', 60)
+                : '_ungrouped'
+            : '';
         const bucket = `${groupDir}/${typeDir}`;
         counters[bucket] = (counters[bucket] ?? 0) + 1;
         const seq = String(counters[bucket]).padStart(3, '0');
-        const fileName = `${seq}_${safeName(a.name)}_${a.nodeKey}.${a.ext}`;
-        planned.push({ asset: a, relPath: path.posix.join(...[groupDir, typeDir, fileName].filter(Boolean)) });
+        planned.push({ asset: a, relPath: path.posix.join(...[groupDir, typeDir, fileNameFor(seq, a)].filter(Boolean)) });
     }
     return planned;
 }
@@ -774,11 +759,15 @@ export interface DownloadResult {
     error?: string;
 }
 
-/** Download one file with content-length verification and retries. */
-async function downloadFile(url: string, dest: string, expectedBytes: number, retries = 4): Promise<number> {
+/**
+ * Download one file with size verification and retries.
+ * The temporary file carries a per-file tag so concurrent exports of the same
+ * canvas cannot race each other on the same `.part` path.
+ */
+async function downloadFile(url: string, dest: string, expectedBytes: number, tempTag: string, retries = 4): Promise<number> {
     let lastErr = '';
+    const tmp = `${dest}.${tempTag}.part`;
     for (let attempt = 0; attempt < retries; attempt++) {
-        const tmp = `${dest}.part`;
         try {
             const res = await fetch(url, {
                 headers: { 'User-Agent': 'Mozilla/5.0 (compatible; opencli-libtv)' },
@@ -787,6 +776,8 @@ async function downloadFile(url: string, dest: string, expectedBytes: number, re
             if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
             await pipeline(Readable.fromWeb(res.body as any), fs.createWriteStream(tmp));
             const got = fs.statSync(tmp).size;
+            // Verify against Content-Length when the CDN sends one, else the
+            // declared byteSize when known.
             const declared = Number(res.headers.get('content-length') ?? 0);
             const want = declared || expectedBytes;
             if (want && got !== want) throw new Error(`size mismatch (${got}/${want})`);
@@ -827,11 +818,14 @@ export async function runExport(
             const dest = path.join(outDir, job.relPath);
             let result: DownloadResult;
             try {
-                if (!opts.overwrite && fs.existsSync(dest) && fs.statSync(dest).size > 0) {
-                    result = { relPath: job.relPath, status: 'skipped', bytes: fs.statSync(dest).size };
+                let existing = 0;
+                if (!opts.overwrite && fs.existsSync(dest)) existing = fs.statSync(dest).size;
+                const expected = job.asset.bytes;
+                if (existing > 0 && (!expected || existing === expected)) {
+                    result = { relPath: job.relPath, status: 'skipped', bytes: existing };
                 } else {
                     fs.mkdirSync(path.dirname(dest), { recursive: true });
-                    const bytes = await downloadFile(job.asset.url, dest, job.asset.bytes);
+                    const bytes = await downloadFile(job.asset.url, dest, expected, `${process.pid}-${i}`);
                     result = { relPath: job.relPath, status: 'ok', bytes };
                 }
             } catch (err) {
@@ -850,6 +844,14 @@ export async function runExport(
     return results;
 }
 
+/** Quote one CSV cell, neutralising spreadsheet formula injection. */
+function csvCell(value: unknown): string {
+    const text = String(value ?? '');
+    const isNumber = /^-?\d+(\.\d+)?$/.test(text);
+    const safe = !isNumber && /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+    return `"${safe.replace(/"/g, '""')}"`;
+}
+
 /** Write a UTF-8 (BOM) CSV manifest for one exported canvas. */
 export function writeManifest(
     outDir: string,
@@ -858,7 +860,20 @@ export function writeManifest(
     results: DownloadResult[],
 ): string {
     const byRel = new Map(results.map((r) => [r.relPath, r]));
-    const header = ['group', 'type', 'name', 'model', 'width', 'height', 'duration_sec', 'bytes', 'rel_path', 'node_key', 'url'];
+    const header = [
+        'group',
+        'type',
+        'name',
+        'model',
+        'width',
+        'height',
+        'duration_sec',
+        'bytes',
+        'status',
+        'rel_path',
+        'node_key',
+        'url',
+    ];
     const rows = planned.map((p) => {
         const a = p.asset;
         const r = byRel.get(p.relPath);
@@ -871,14 +886,13 @@ export function writeManifest(
             a.height === '' ? '' : String(a.height),
             a.durationSec === '' ? '' : String(a.durationSec),
             String(r?.bytes ?? a.bytes),
+            r?.status ?? 'missing',
             p.relPath,
             a.nodeKey,
             a.url,
         ];
     });
-    const csv = [header, ...rows]
-        .map((cols) => cols.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
-        .join('\n');
+    const csv = [header, ...rows].map((cols) => cols.map(csvCell).join(',')).join('\n');
     const manifestPath = path.join(outDir, 'manifest.csv');
     fs.mkdirSync(outDir, { recursive: true });
     fs.writeFileSync(manifestPath, `\uFEFF${csv}\n`, 'utf-8');

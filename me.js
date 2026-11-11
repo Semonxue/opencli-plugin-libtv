@@ -3,7 +3,7 @@ import { LIBTV_DOMAIN, LIBTV_HOME, readAccount } from "./lib/utils.js";
 cli({
   site: "libtv",
   name: "me",
-  description: "Show the logged-in LibTV account (plan, total/usable power, free power, concurrency).",
+  description: "Utility: show the logged-in account (plan, total/usable power, free power, concurrency).",
   access: "read",
   domain: LIBTV_DOMAIN,
   strategy: Strategy.COOKIE,
