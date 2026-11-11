@@ -22,7 +22,7 @@ cli({
     args: [
         { name: 'limit', type: 'int', default: 30, help: 'Max artifacts (default: 30)' },
         { name: 'media', choices: ['all', 'image', 'video', 'audio'], default: 'all', help: 'Filter by media type' },
-        { name: 'project', default: '', help: 'Only artifacts from this project (uuid / id / name)' },
+        { name: 'project', default: '', help: 'Only artifacts from this project (canvas URL / uuid / id / name)' },
     ],
     columns: ['#', 'media', 'size_px', 'project', 'node_key', 'created', 'url'],
     func: async (page: any, kwargs: any) => {

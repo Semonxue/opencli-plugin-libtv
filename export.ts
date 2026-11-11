@@ -36,7 +36,7 @@ cli({
     navigateBefore: LIBTV_HOME,
     example: 'opencli libtv export 5110c03295d34f64aff6e398cb91d764 --out ./exports',
     args: [
-        { name: 'project', positional: true, required: true, help: 'Project uuid, numeric id, or name substring' },
+        { name: 'project', positional: true, required: true, help: 'Canvas URL, project uuid, numeric id, or name substring' },
         { name: 'out', default: './libtv-export', help: 'Parent output directory (a project subfolder is created)' },
         { name: 'type', choices: ['all', 'image', 'video', 'audio'], default: 'all', help: 'Only export this media type' },
         { name: 'group', default: '', help: 'Only export assets in groups matching this substring' },

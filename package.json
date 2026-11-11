@@ -1,6 +1,6 @@
 {
   "name": "opencli-plugin-libtv",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "LibTV (liblib.tv) CLI adapter — canvases, nodes, assets, grouped export, characters, artifacts",
   "peerDependencies": {

@@ -19,7 +19,7 @@ cli({
     navigateBefore: LIBTV_HOME,
     example: 'opencli libtv detail 5110c03295d34f64aff6e398cb91d764',
     args: [
-        { name: 'project', positional: true, required: true, help: 'Project uuid, numeric id, or name substring' },
+        { name: 'project', positional: true, required: true, help: 'Canvas URL, project uuid, numeric id, or name substring' },
     ],
     columns: ['name', 'uuid', 'nodes', 'images', 'videos', 'audio', 'groups', 'assets', 'size_mb', 'size_unknown', 'models', 'updated', 'url'],
     func: async (page: any, kwargs: any) => {

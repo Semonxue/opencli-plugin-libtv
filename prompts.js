@@ -11,7 +11,7 @@ cli({
   navigateBefore: LIBTV_HOME,
   example: "opencli libtv prompts 5110c03295d34f64aff6e398cb91d764 --type video",
   args: [
-    { name: "project", positional: true, required: true, help: "Project uuid, numeric id, or name substring" },
+    { name: "project", positional: true, required: true, help: "Canvas URL, project uuid, numeric id, or name substring" },
     { name: "type", choices: ["all", "image", "video", "audio"], default: "all", help: "Filter by media type" },
     { name: "group", default: "", help: "Filter by group name substring" },
     { name: "limit", type: "int", default: 0, help: "Max rows (0 = all)" }

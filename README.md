@@ -36,11 +36,28 @@ session at <https://www.liblib.tv> (the `usertoken` cookie is the credential).
 | `libtv versions <p>` | Canvas snapshot history |
 | `libtv version` | Plugin version |
 
-`<p>` accepts a **uuid**, a **numeric project id**, or a **name substring** (e.g. `科技篇`).
+`<p>` accepts any of:
+
+| Form | Example |
+|---|---|
+| **Canvas URL (copy from the address bar)** | `https://www.liblib.tv/canvas?spaceId=11161198&projectId=5110c032...` |
+| URL without `spaceId` | `https://www.liblib.tv/canvas?projectId=5110c032...` |
+| Bare uuid | `5110c03295d34f64aff6e398cb91d764` |
+| Numeric project id | `14839047` |
+| Name substring (e.g. `科技篇`) | `科技篇` |
+
+URLs and bare uuids resolve **without any list lookup** — the canvas endpoint only needs the
+uuid, and the real name/space/id come back in `projectMeta`. Only numeric ids and name
+substrings page `/api/canvas/project/list`. Recognised URL params: `projectId`, `projectUuid`,
+`uuid`, `canvasId` (or a 32-char uuid anywhere in the path); `spaceId` is read as a hint only.
 
 ## Examples
 
 ```bash
+# paste a canvas URL straight from the browser
+opencli libtv detail "https://www.liblib.tv/canvas?spaceId=11161198&projectId=5110c03295d34f64aff6e398cb91d764"
+opencli libtv export "https://www.liblib.tv/canvas?projectId=5110c03295d34f64aff6e398cb91d764" --out ./exports
+
 opencli libtv projects --search 全景篇 -f json
 opencli libtv detail 5110c03295d34f64aff6e398cb91d764
 opencli libtv assets 全景篇 --type video -f csv > videos.csv
@@ -68,8 +85,9 @@ Projects without groups export flat (`exports/<p>/images/...`) — no `_ungroupe
 |---|---|
 | Auth | `usertoken` cookie → `token` header (+ `webid`, `x-client-type`, `x-language`) |
 | Transport | `page.fetchJson` from the logged-in page (no API keys, no separate HTTP client) |
-| Canvas data | `GET /api/canvas/project/detail-by-space?spaceId=&projectUuid=` → `data.projectDetail.nodeList` |
+| Canvas data | `GET /api/canvas/project/detail?uuid=` → `data.nodeList` (no spaceId needed; `detail-by-space` kept as fallback) |
 | Grouping | node `.parentKey` → group node name (cross-checked against group `.childNodeIds`) |
+| Project ref | `parseProjectRef()` — URL / uuid / numeric id / name → uuid (+ optional spaceId hint) |
 | Asset URL | node `data.url` (string or array), stripped of `?x-oss-process=` so you get the original file |
 | Metadata | `data._resourceMeta.items[0]` → width/height/duration/byteSize/mime |
 | Account | `api2.liblib.art/api/www/member/account?isApp=false` |
@@ -85,6 +103,9 @@ Projects without groups export flat (`exports/<p>/images/...`) — no `_ungroupe
   file against `Content-Length`, retries from scratch on mismatch, and only then renames off `.part`.
 - **DOM is not a source of truth**: the canvas virtualises — only ~60 of 291 nodes exist in the DOM
   at any zoom level — which is why everything here goes through the API.
+- **Simplicity of the uuid endpoint**: `/api/canvas/project/detail?uuid=` returns the same
+  292-node / 505-edge payload as `detail-by-space` in one call and works for canvases that were
+  shared with you, which is why pasted URLs "just work".
 - All commands are `access: read`; nothing mutates the canvas.
 
 ## Development

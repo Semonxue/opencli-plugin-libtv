@@ -6,7 +6,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { safeName, extOf, parseCanvas, planExport, mb, formatDate, canvasUrl } from '../lib/utils.js';
+import { safeName, extOf, parseCanvas, planExport, mb, formatDate, canvasUrl, parseProjectRef, enrichProject } from '../lib/utils.js';
 
 const project = {
     id: 1,
@@ -171,4 +171,67 @@ test('small formatting helpers', () => {
     assert.equal(formatDate(0), '');
     assert.match(formatDate(1700000000000), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
     assert.equal(canvasUrl('abc'), 'https://www.liblib.tv/canvas?projectId=abc');
+});
+
+// ── parseProjectRef: pasted canvas URLs ─────────────────────────────────────
+
+test('parseProjectRef reads uuid + spaceId from a canvas URL', () => {
+    const ref = parseProjectRef(
+        'https://www.liblib.tv/canvas?spaceId=11161198&projectId=5110c03295d34f64aff6e398cb91d764',
+    );
+    assert.equal(ref.kind, 'url');
+    assert.equal(ref.uuid, '5110c03295d34f64aff6e398cb91d764');
+    assert.equal(ref.spaceId, 11161198);
+    assert.equal(ref.problem, undefined);
+});
+
+test('parseProjectRef works without spaceId, with reordered or extra params', () => {
+    const a = parseProjectRef('https://www.liblib.tv/canvas?projectId=5110c03295d34f64aff6e398cb91d764');
+    assert.equal(a.uuid, '5110c03295d34f64aff6e398cb91d764');
+    assert.equal(a.spaceId, 0);
+
+    const b = parseProjectRef(
+        'https://www.liblib.tv/canvas?projectId=5110c03295d34f64aff6e398cb91d764&spaceId=42&from=share&tab=assets',
+    );
+    assert.equal(b.uuid, '5110c03295d34f64aff6e398cb91d764');
+    assert.equal(b.spaceId, 42);
+});
+
+test('parseProjectRef accepts projectUuid/uuid/canvasId params and uuid in path', () => {
+    const u = '5110c03295d34f64aff6e398cb91d764';
+    assert.equal(parseProjectRef(`https://www.liblib.tv/canvas?projectUuid=${u}`).uuid, u);
+    assert.equal(parseProjectRef(`https://www.liblib.tv/canvas?uuid=${u}`).uuid, u);
+    assert.equal(parseProjectRef(`https://www.liblib.tv/canvas?canvasId=${u}`).uuid, u);
+    assert.equal(parseProjectRef(`https://www.liblib.tv/canvas/${u}`).uuid, u);
+});
+
+test('parseProjectRef classifies bare uuids, numeric ids and names', () => {
+    assert.equal(parseProjectRef('5110c03295d34f64aff6e398cb91d764').kind, 'uuid');
+    assert.equal(parseProjectRef('14839047').kind, 'id');
+    assert.equal(parseProjectRef('14839047').numericId, 14839047);
+    assert.equal(parseProjectRef('科技篇').kind, 'name');
+    assert.equal(parseProjectRef('').problem, 'empty');
+});
+
+test('parseProjectRef reports a URL that carries no project id', () => {
+    const ref = parseProjectRef('https://www.liblib.tv/projects');
+    assert.equal(ref.kind, 'url');
+    assert.equal(ref.uuid, '');
+    assert.match(ref.problem, /no projectId/);
+});
+
+test('enrichProject takes name/id/space from projectMeta', () => {
+    const stub = { id: 0, uuid: 'abc', name: '', folderId: 0, projectSpaceId: 0, projectType: 0, updatedAtMs: 0, createdAtMs: 0, url: '' };
+    const out = enrichProject(stub, {
+        id: 14839047,
+        uuid: '5110c03295d34f64aff6e398cb91d764',
+        name: '全景篇',
+        projectSpaceId: 11161198,
+        folderId: 11161198,
+        updatedAtMs: 1791800939000,
+    });
+    assert.equal(out.name, '全景篇');
+    assert.equal(out.id, 14839047);
+    assert.equal(out.projectSpaceId, 11161198);
+    assert.equal(out.updatedAtMs, 1791800939000);
 });

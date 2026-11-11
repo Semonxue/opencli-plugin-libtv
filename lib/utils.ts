@@ -197,18 +197,127 @@ function mapProject(it: any): LibtvProject | null {
     };
 }
 
+/** Canonical 32-char hex project uuid. */
+const UUID_RE = /^[0-9a-f]{32}$/i;
+
 /**
- * Resolve a project reference — uuid, numeric id, or name substring —
- * into a full project record (needed for `projectSpaceId`).
+ * What a `<project>` argument turned out to be.
+ * `spaceId` is only a hint — canvas loading no longer requires it.
+ */
+export interface ProjectRef {
+    kind: 'url' | 'uuid' | 'id' | 'name';
+    uuid: string;
+    numericId: number;
+    spaceId: number;
+    /** Detailed error string when the argument looked like a URL but had no project id. */
+    problem?: string;
+}
+
+/**
+ * Parse a `<project>` argument. Accepts, in this order:
+ *
+ *   https://www.liblib.tv/canvas?spaceId=11161198&projectId=5110c032...
+ *   https://www.liblib.tv/canvas?projectId=5110c032...        (spaceId optional)
+ *   .../canvas/5110c03295d34f64aff6e398cb91d764               (uuid in the path)
+ *   5110c03295d34f64aff6e398cb91d764                          (bare uuid)
+ *   14839047                                                 (numeric project id)
+ *   科技篇                                                    (name substring)
+ *
+ * URL params checked for the uuid: `projectId`, `projectUuid`, `uuid`, `canvasId`.
+ * Space hints: `spaceId`, `projectSpaceId`, `folderId`.
+ */
+export function parseProjectRef(ref: string): ProjectRef {
+    const raw = String(ref ?? '').trim();
+    if (!raw) return { kind: 'name', uuid: '', numericId: 0, spaceId: 0, problem: 'empty' };
+
+    if (/^https?:\/\//i.test(raw)) {
+        let url: URL | null = null;
+        try {
+            url = new URL(raw);
+        } catch {
+            return { kind: 'url', uuid: '', numericId: 0, spaceId: 0, problem: 'malformed URL' };
+        }
+        const params = url.searchParams;
+        let uuid = '';
+        let numericId = 0;
+        for (const key of ['projectId', 'projectUuid', 'uuid', 'canvasId', 'canvasUuid']) {
+            const value = (params.get(key) ?? '').trim();
+            if (!value) continue;
+            if (UUID_RE.test(value)) {
+                uuid = value;
+                break;
+            }
+            if (/^\d+$/.test(value) && !numericId) numericId = Number(value);
+        }
+        if (!uuid && !numericId) {
+            // Some routes carry the uuid as a path segment instead of a param.
+            const hit = url.pathname.match(/[0-9a-f]{32}/i);
+            if (hit) uuid = hit[0];
+        }
+        const spaceRaw = (
+            params.get('spaceId') ??
+            params.get('projectSpaceId') ??
+            params.get('folderId') ??
+            ''
+        ).trim();
+        const spaceId = /^\d+$/.test(spaceRaw) ? Number(spaceRaw) : 0;
+        return {
+            kind: 'url',
+            uuid,
+            numericId,
+            spaceId,
+            problem: uuid || numericId ? undefined : 'no projectId/projectUuid in the URL',
+        };
+    }
+
+    if (UUID_RE.test(raw)) return { kind: 'uuid', uuid: raw, numericId: 0, spaceId: 0 };
+    if (/^\d+$/.test(raw)) return { kind: 'id', uuid: '', numericId: Number(raw), spaceId: 0 };
+    return { kind: 'name', uuid: '', numericId: 0, spaceId: 0 };
+}
+
+/** Bare project record for a known uuid — filled in from `projectMeta` on load. */
+function stubProject(uuid: string, spaceId = 0): LibtvProject {
+    return {
+        id: 0,
+        uuid,
+        name: '',
+        folderId: 0,
+        projectSpaceId: spaceId,
+        projectType: 0,
+        updatedAtMs: 0,
+        createdAtMs: 0,
+        url: canvasUrl(uuid),
+    };
+}
+
+/**
+ * Resolve a `<project>` argument into a project record.
+ *
+ * URLs and bare uuids resolve **without any API call** — canvas loading only
+ * needs the uuid, and the real name/space/id come back in `projectMeta`.
+ * Numeric ids and names fall back to paging `/api/canvas/project/list`.
  */
 export async function resolveProject(page: any, ref: string, limit = 400): Promise<LibtvProject> {
+    const parsed = parseProjectRef(ref);
     const needle = String(ref ?? '').trim();
-    if (!needle) throw new CommandExecutionError('A project id, uuid or name is required.');
 
-    // Exact uuid / id match is the common case — avoid paging everything.
+    if (parsed.kind === 'url' && parsed.problem) {
+        throw new CommandExecutionError(
+            `Could not read a project id from "${needle}" (${parsed.problem}). ` +
+                'Expected a canvas URL like https://www.liblib.tv/canvas?projectId=<uuid>.',
+        );
+    }
+    if (parsed.uuid) return stubProject(parsed.uuid, parsed.spaceId);
+    if (!needle) throw new CommandExecutionError('A project URL, uuid, id or name is required.');
+
     const all = await listProjects(page, { limit });
-    const exact = all.find((p) => p.uuid === needle || String(p.id) === needle);
-    if (exact) return exact;
+    if (parsed.kind === 'id') {
+        const byId = all.find((p) => p.id === parsed.numericId);
+        if (byId) return byId;
+        throw new CommandExecutionError(
+            `No LibTV project with id ${parsed.numericId}. Run \`opencli libtv projects\` to list them.`,
+        );
+    }
 
     const lower = needle.toLowerCase();
     const byName = all.filter((p) => p.name.toLowerCase().includes(lower));
@@ -216,11 +325,12 @@ export async function resolveProject(page: any, ref: string, limit = 400): Promi
     if (byName.length > 1) {
         throw new CommandExecutionError(
             `"${needle}" matches ${byName.length} projects: ${byName.slice(0, 8).map((p) => `${p.name} (${p.uuid})`).join(', ')}` +
-                '. Pass the exact uuid instead.',
+                '. Pass the exact uuid or a canvas URL instead.',
         );
     }
     throw new CommandExecutionError(
-        `No LibTV project matches "${needle}". Run \`opencli libtv projects\` to list them.`,
+        `No LibTV project matches "${needle}". Run \`opencli libtv projects\` to list them, ` +
+            'or pass the canvas URL directly.',
     );
 }
 
@@ -303,22 +413,70 @@ export function extOf(url: string, type: string): string {
     return /^[a-z0-9]{1,5}$/.test(ext) ? ext : TYPE_EXTS[type] ?? 'bin';
 }
 
-/** Fetch and normalise one canvas. */
+/**
+ * Fill in the real name/id/space/timestamps for a canvas.
+ *
+ * A `<project>` argument may arrive as a bare uuid or URL, in which case the
+ * record is only a stub — `projectMeta` in the canvas payload is authoritative.
+ */
+export function enrichProject(project: LibtvProject, meta: any): LibtvProject {
+    if (!meta || typeof meta !== 'object') return project;
+    const uuid = String(meta.uuid ?? project.uuid);
+    return {
+        id: Number(meta.id ?? project.id) || project.id,
+        uuid,
+        name: String(meta.name ?? project.name ?? '') || uuid.slice(0, 8),
+        folderId: Number(meta.folderId ?? project.folderId) || project.folderId,
+        projectSpaceId: Number(meta.projectSpaceId ?? project.projectSpaceId) || project.projectSpaceId,
+        projectType: Number(meta.projectType ?? project.projectType) || project.projectType,
+        updatedAtMs: Number(meta.updatedAtMs ?? project.updatedAtMs) || project.updatedAtMs,
+        createdAtMs: Number(meta.createdAtMs ?? project.createdAtMs) || project.createdAtMs,
+        url: canvasUrl(uuid),
+    };
+}
+
+/**
+ * Fetch and normalise one canvas.
+ *
+ * Primary endpoint is `GET /api/canvas/project/detail?uuid=` — it needs no
+ * spaceId, so a pasted canvas URL is enough. Older `detail-by-space` (nested
+ * under `projectDetail`) is kept as a fallback for shapes it alone serves.
+ */
 export async function fetchCanvas(page: any, project: LibtvProject): Promise<LibtvCanvas> {
-    const spaceId = project.projectSpaceId;
-    const data = await callApi(
-        page,
-        CANVAS_HOST,
-        `/api/canvas/project/detail-by-space?spaceId=${encodeURIComponent(String(spaceId))}&projectUuid=${encodeURIComponent(project.uuid)}`,
-        { method: 'GET' },
-    );
-    const detail = data?.projectDetail;
+    let detail: any = null;
+    let lastError: unknown = null;
+
+    try {
+        const data = await callApi(page, CANVAS_HOST, `/api/canvas/project/detail?uuid=${encodeURIComponent(project.uuid)}`, {
+            method: 'GET',
+        });
+        if (data && Array.isArray(data.nodeList)) detail = data;
+    } catch (err) {
+        lastError = err;
+    }
+
+    if (!detail && project.projectSpaceId) {
+        try {
+            const data = await callApi(
+                page,
+                CANVAS_HOST,
+                `/api/canvas/project/detail-by-space?spaceId=${encodeURIComponent(String(project.projectSpaceId))}&projectUuid=${encodeURIComponent(project.uuid)}`,
+                { method: 'GET' },
+            );
+            const nested = data?.projectDetail;
+            if (nested && Array.isArray(nested.nodeList)) detail = nested;
+        } catch (err) {
+            lastError = lastError ?? err;
+        }
+    }
+
     if (!detail) {
+        if (lastError) throw lastError;
         throw new CommandExecutionError(
-            `Canvas ${project.uuid} returned no projectDetail (is the canvas empty or deleted?).`,
+            `Canvas ${project.uuid} could not be loaded (empty, deleted, or not shared with this account?).`,
         );
     }
-    return parseCanvas(project, detail);
+    return parseCanvas(enrichProject(project, detail.projectMeta), detail);
 }
 
 export function parseCanvas(project: LibtvProject, detail: any): LibtvCanvas {
