@@ -1,0 +1,6 @@
+{
+  "name": "libtv",
+  "version": "0.1.0",
+  "description": "LibTV (liblib.tv) CLI adapter — canvases, nodes, assets, grouped export, characters, artifacts",
+  "opencli": ">=2.0.0"
+}
